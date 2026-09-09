@@ -1,5 +1,7 @@
 # CDN Cache Simulator
 
+**▶ Live demo: https://cdn-cache-sim-playground.vercel.app** — tune the workload (Zipf skew, catalog size, edge cache MB) in the browser and see hit ratio, origin offload and latency, compare eviction policies, or sweep cache size (runs on a Vercel Python function; code in [`web/`](web/)).
+
 A trace-driven simulator for a **Content Delivery Network's cache hierarchy**.
 It models realistic web traffic (Zipf popularity, heavy-tailed object sizes,
 TTLs), shards the catalog across edge servers with **consistent hashing**, walks

@@ -1,0 +1,1 @@
+# cdnsim is pure stdlib; no third-party deps

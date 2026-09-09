@@ -12,3 +12,7 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+
+# Vercel
+.vercel/
+web/.vercel/

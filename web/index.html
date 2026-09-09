@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CDN Cache Simulator</title>
+<style>
+  :root{
+    --bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#e6edf3;--muted:#8b949e;
+    --accent:#2f81f7;--ok:#3fb950;--err:#f85149;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{padding:20px 24px;border-bottom:1px solid var(--border)}
+  h1{margin:0;font-size:18px} h1 span{color:var(--muted);font-weight:400}
+  .sub{margin:4px 0 0;color:var(--muted);font-size:13px}
+  .sub a{color:var(--accent);text-decoration:none}
+  main{max-width:960px;margin:0 auto;padding:20px 24px}
+  .controls{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;
+    background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px}
+  .f{display:flex;flex-direction:column;gap:4px}
+  .f label{font-size:12px;color:var(--muted)}
+  select,input,button{font:inherit;background:#0d1117;color:var(--fg);
+    border:1px solid var(--border);border-radius:6px;padding:7px 10px}
+  input[type=number]{width:100px}
+  button{cursor:pointer;background:var(--panel)}
+  button.go{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}
+  button.go:disabled{opacity:.6;cursor:progress}
+  .status{margin:12px 0 4px;font-size:12px;color:var(--muted);min-height:16px}
+  .status.ok{color:var(--ok)} .status.err{color:var(--err)}
+  table{border-collapse:collapse;width:100%;margin-top:8px;font-size:13px}
+  th,td{border:1px solid var(--border);padding:7px 10px;text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  thead th{background:var(--panel)}
+  tbody tr.best td{background:rgba(63,185,80,.12)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+    padding:16px;margin-top:16px;overflow:auto}
+  .card h3{margin:0 0 8px;font-size:14px}
+  .card.err{color:var(--err)}
+  .note{color:var(--muted);font-size:12px;margin-top:8px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px}
+  .kv{display:flex;justify-content:space-between;border-bottom:1px dotted var(--border);padding:4px 0}
+  .kv span:first-child{color:var(--muted)}
+  .kv span:last-child{font-family:var(--mono)}
+  .bar{height:8px;background:#0d1117;border-radius:4px;overflow:hidden;margin-top:2px}
+  .bar>i{display:block;height:100%;background:var(--accent)}
+  footer{max-width:960px;margin:0 auto;padding:8px 24px 32px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>CDN Cache Simulator <span>— edge / regional / origin, Zipf traffic</span></h1>
+  <p class="sub">clients → sharded edge PoP → regional cache → origin. Reports hit ratio, origin offload, bandwidth saved, latency percentiles.
+    Source: <a href="https://github.com/pastbologanesh0101/cdn-cache-sim" target="_blank" rel="noopener">github.com/pastbologanesh0101/cdn-cache-sim</a></p>
+</header>
+
+<main>
+  <div class="controls">
+    <div class="f"><label>policy (single run / sweep)</label>
+      <select id="policy"><option>lru</option><option>lfu</option>
+        <option>s3fifo</option><option>fifo</option></select></div>
+    <div class="f"><label>catalog objects</label><input type="number" id="objects" value="15000" min="500" max="40000" step="1000"></div>
+    <div class="f"><label>Zipf s (skew)</label><input type="number" id="zipf" value="0.9" min="0.3" max="1.6" step="0.1"></div>
+    <div class="f"><label>edge cache (MB)</label><input type="number" id="edge_mb" value="64" min="1" max="2048"></div>
+    <div class="f"><label>requests</label><input type="number" id="requests" value="40000" min="2000" max="60000" step="2000"></div>
+    <button class="go" id="run">Run ▸</button>
+    <button id="compare">Compare policies</button>
+    <button id="sweep">Cache-size sweep</button>
+  </div>
+
+  <div class="status" id="status">set parameters, then Run</div>
+  <div id="results"></div>
+</main>
+
+<footer>Runs server-side on a Vercel Python function. Requests capped at 60k, catalog at 40k objects.</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const S = $('#status'), R = $('#results');
+const btns = ['#run','#compare','#sweep'].map($);
+const esc = s => String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const pct = x => (x*100).toFixed(1) + '%';
+
+function params(extra){
+  return Object.assign({
+    policy:$('#policy').value, objects:+$('#objects').value, zipf:+$('#zipf').value,
+    edge_mb:+$('#edge_mb').value, requests:+$('#requests').value
+  }, extra);
+}
+
+async function call(body){
+  btns.forEach(b=>b.disabled=true);
+  S.className='status'; S.textContent='simulating…';
+  const t0 = performance.now();
+  try{
+    const r = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    const d = await r.json();
+    S.className='status '+(d.ok?'ok':'err');
+    S.textContent=(d.ok?'✓ ':'✗ ')+Math.round(performance.now()-t0)+' ms';
+    if(!d.ok){ R.innerHTML='<div class="card err">'+esc(d.text||'error')+'</div>'; return; }
+    ({run:renderRun,compare:renderCompare,sweep:renderSweep}[d.kind])(d);
+  }catch(e){ S.className='status err'; S.textContent='✗ '+e; }
+  finally{ btns.forEach(b=>b.disabled=false); }
+}
+
+function renderRun(d){
+  const m = d.summary, l = m.latency_ms;
+  R.innerHTML = `<div class="card"><h3>${d.policy.toUpperCase()} · ${d.requests.toLocaleString()} requests · hot 10% ≈ ${d.working_set_top10pct_mb} MB</h3>
+    <div class="grid2">
+      ${kv('overall hit ratio', pct(m.overall_hit_ratio), m.overall_hit_ratio)}
+      ${kv('edge hit ratio', pct(m.edge_hit_ratio), m.edge_hit_ratio)}
+      ${kv('origin offload', pct(m.origin_offload), m.origin_offload)}
+      ${kv('bandwidth saved', pct(m.bandwidth_saved), m.bandwidth_saved)}
+      <div class="kv"><span>latency p50 / p90 / p99</span><span>${l.p50} / ${l.p90} / ${l.p99} ms</span></div>
+      <div class="kv"><span>mean latency</span><span>${l.mean} ms</span></div>
+      <div class="kv"><span>GB from origin</span><span>${m.gb_from_origin}</span></div>
+      <div class="kv"><span>GB from edge</span><span>${m.gb_from_edge}</span></div>
+    </div></div>`;
+}
+function kv(k,v,frac){
+  return `<div class="kv"><span>${k}</span><span>${v}</span></div>
+    <div class="bar"><i style="width:${Math.round((frac||0)*100)}%"></i></div>`;
+}
+
+function renderCompare(d){
+  const cols = [['overall_hit_ratio','overall hit'],['edge_hit_ratio','edge hit'],
+    ['origin_offload','offload'],['bandwidth_saved','bw saved']];
+  const rows = Object.entries(d.table).map(([p,m])=>
+    `<tr class="${p===d.best?'best':''}"><td>${p}</td>
+      ${cols.map(([k])=>`<td>${pct(m[k])}</td>`).join('')}
+      <td>${m.latency_ms.p99} ms</td></tr>`).join('');
+  R.innerHTML = `<div class="card"><h3>All policies · edge ${d.edge_mb} MB · ${d.requests.toLocaleString()} requests</h3>
+    <table><thead><tr><th>policy</th>${cols.map(([,l])=>`<th>${l}</th>`).join('')}<th>p99</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="note">Best hit ratio: <b>${d.best}</b>. On Zipf traffic, LFU / S3-FIFO beat LRU beat FIFO.</div></div>`;
+}
+
+function renderSweep(d){
+  const max = Math.max(...d.rows.map(r=>r.overall_hit_ratio));
+  const rows = d.rows.map(r=>`<tr><td>${r.edge_mb}</td>
+    <td>${pct(r.overall_hit_ratio)}</td><td>${pct(r.edge_hit_ratio)}</td>
+    <td>${pct(r.origin_offload)}</td><td>${r.p99_ms} ms</td>
+    <td style="width:120px"><div class="bar"><i style="width:${Math.round(r.overall_hit_ratio/max*100)}%"></i></div></td></tr>`).join('');
+  R.innerHTML = `<div class="card"><h3>${d.policy.toUpperCase()} · overall hit ratio vs edge cache size</h3>
+    <table><thead><tr><th>edge MB</th><th>overall hit</th><th>edge hit</th><th>offload</th><th>p99</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="note">Diminishing returns once the cache covers the working set. A two-tier hierarchy can wobble slightly (a bigger edge changes what the regional tier sees).</div></div>`;
+}
+
+$('#run').onclick = () => call(params({mode:'run'}));
+$('#compare').onclick = () => call(params({mode:'compare'}));
+$('#sweep').onclick = () => call(params({mode:'sweep'}));
+call(params({mode:'compare'}));
+</script>
+</body>
+</html>
